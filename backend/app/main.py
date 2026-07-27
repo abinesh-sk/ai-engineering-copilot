@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 app=FastAPI(title="AI Engineer Copilot")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # loosened for now — tighten to your real Vercel URL once you have it
+    allow_origins=["https://ai-engineering-copilot-nine.vercel.app"],  # loosened for now — tighten to your real Vercel URL once you have it
     allow_methods=["*"],
     allow_headers=["*"],
 )
