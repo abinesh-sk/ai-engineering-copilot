@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 node_modules/
 .vercel/
+*.docx
+New Text Document.txt
+Prompt AI Engineer Copilot v1.md
+Replay_Architecture_Refactor_Prompt.md
+System Design and Learning Plan v1.md
