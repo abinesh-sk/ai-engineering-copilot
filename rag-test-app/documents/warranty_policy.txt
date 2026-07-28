@@ -1,0 +1,10 @@
+﻿COMPANY WARRANTY POLICY
+
+Standard Warranty
+All products except Product X and clearance items carry a 1-year manufacturer warranty covering defects in materials and workmanship. This does not cover damage from misuse, accidents, or normal wear.
+
+Product X Extended Warranty
+Product X (industrial safety equipment) carries a 3-year extended warranty due to its safety-critical nature, separate from and in addition to the standard 1-year warranty terms. Warranty claims for Product X require the original certification card that shipped with the unit.
+
+Filing a Warranty Claim
+To file a warranty claim, submit the product serial number and a description of the defect through the support portal. Approved claims are resolved via repair, replacement, or store credit at our discretion, typically within 10 business days.
