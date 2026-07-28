@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 5 — Backend deployed to Render (free tier), React frontend skeleton deployed to Vercel, both talking to each other in production
-**Next up:** Day 6 — Local RAG script: load sample company-policy documents, chunk, embed, store in pgvector
+**Last completed:** Day 6 — Local RAG test app scaffolded (`rag-test-app/`, separate venv, decoupled from platform); 3 sample company-policy documents written; paragraph-chunked, embedded locally (`all-MiniLM-L6-v2`, 384-dim), and stored in a new `documents` table in the same Neon Postgres/pgvector instance
+**Next up:** Day 7 — Wire retrieval + prompt + Groq LLM call into `rag-test-app`; package and POST a full trace to the platform
 **Blocking issues:** None
 
 ---
@@ -54,6 +54,11 @@
 - **Root Directory setting on Render/Vercel** — both platforms needed to be told the app actually lives in a subfolder (`backend/`, `frontend/`) rather than the repo root, since the git repo wraps both apps as siblings (Day 5)
 - **Vite env vars (`VITE_` prefix + `import.meta.env`)** — only vars prefixed `VITE_` are exposed to browser code at build time; swapping `.env.local` (dev) for a platform env var (prod) changes the API target with zero code changes — same interface-swapping instinct as `LLMProvider`, applied to config (Day 5)
 - **Platform value fields aren't `.env` file parsers** — Render/Vercel env var value boxes take the literal string typed in, quotes and all; copying a display string like `KEY="value"` verbatim (quotes included) breaks the connection, since the quotes become part of the literal value (Day 5)
+- **Why the RAG test app lives in its own top-level folder, not inside `backend/`** — Section 5.1 marks the "AI Application Layer" as External to the platform; building it inside `backend/app/` would blur the exact boundary the platform exists to observe from the outside (Day 6)
+- **Local embeddings vs. an embeddings API** — `sentence-transformers` (`all-MiniLM-L6-v2`, 384-dim, CPU, no API key) keeps the RAG test app's retrieval concern free and local; this is separate from Groq, which is used later purely for generation, not embedding (Day 6)
+- **Paragraph-based chunking** — splitting on blank lines works well here because each policy document's paragraphs are already self-contained rules; avoids arbitrary character-count splits that could cut a key sentence in half (a failure mode deliberately *reintroduced* on purpose in Day 8) (Day 6)
+- **Chunks stored in a separate `documents` table, not the platform's schema** — the platform never queries this table directly; it only ever sees the trace the RAG app sends it via the API, keeping the "platform doesn't own the pipeline" boundary honest even in V1, ahead of it mattering for real in Section 21 (Day 6)
+- **venv activation is a silent failure mode, not just a convenience** — `pip install` without `(venv)` showing in the prompt installs into the user/global Python via `--user` fallback, not the venv; the package appears "installed" (pip says Successfully installed) but the script run under the venv's Python still can't see it. Always confirm `(venv)` is present before installing or running (Day 6)
 
 ---
 
@@ -162,7 +167,25 @@
 ---
 
 ### Day 6 — Local RAG script: load, chunk, embed, store in pgvector
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.2
+**Learning objective (per design doc):** What chunking and embedding actually do mechanically
+
+**What was built:**
+- `rag-test-app/` — new top-level folder, sibling to `backend/` and `frontend/`, own venv, own `requirements.txt`, own `.env` (same `DATABASE_URL` as `backend/.env`), own `.gitignore` (`venv/`, `.env`, `__pycache__/`, `*.pyc`)
+- `rag-test-app/documents/` — 3 sample company-policy `.txt` files with deliberately specific, unambiguous rules: `return_policy.txt` (includes the Product X non-returnable/safety-certification detail from Section 2's example scenario), `shipping_policy.txt`, `warranty_policy.txt`
+- `rag-test-app/create_table.py` — creates `documents` table (`id`, `source_file`, `chunk_index`, `content`, `embedding VECTOR(384)`) in the same Neon Postgres instance used by the platform, via direct `psycopg2`
+- `rag-test-app/ingest_documents.py` — paragraph-based chunker (splits on blank lines), embeds each chunk locally via `sentence-transformers` (`all-MiniLM-L6-v2`), truncates and re-inserts into `documents` on every run (idempotent for repeated testing)
+- `rag-test-app/verify_ingestion.py` — sanity-check script: chunk count per file, total count, and a targeted lookup confirming the Product X chunk is intact and retrievable
+
+**Verified:**
+- `python create_table.py` → `documents table ready.`
+- `python ingest_documents.py` → `return_policy.txt: 5 chunks`, `shipping_policy.txt: 5 chunks`, `warranty_policy.txt: 4 chunks`, `Done. Inserted 14 chunks total.`
+- `python verify_ingestion.py` → confirmed same per-file counts, total of 14, and the Product X paragraph returned intact and unsplit
+
+**Deviation logged:** none functionally — see Deviations section for the venv-activation troubleshooting note (Day 6).
+
+---
 
 ### Day 7 — Wire retrieval + prompt + Groq LLM call; POST full trace
 **Status:** ⬜ Not started
@@ -243,6 +266,7 @@
 - **Testing tool:** Design doc mentions "curl/Postman" for Day 3 validation. `curl.exe` with manually-escaped JSON in PowerShell proved too fragile (backtick line continuation + quote escaping both broke). Settled on testing via FastAPI's `/docs` (Swagger UI) as the primary method, with `Invoke-RestMethod` + PowerShell hashtables as the terminal-native alternative. No functional impact — just a Windows/PowerShell-specific tooling note for future days.
 - **RQ `Worker` vs `SimpleWorker`:** RQ's default `Worker` forks a child process per job (`os.fork()`), which doesn't exist on Windows. Local dev worker uses `SimpleWorker` (in-process execution, no crash isolation between jobs) instead. Production deploy (Day 5, Render/Fly — Linux containers) can switch back to the default `Worker` for proper crash isolation; worth revisiting then rather than assuming `SimpleWorker` is the permanent choice.
 - **Worker deployment topology (Day 5):** neither Render's Background Worker service type nor Fly.io offer a genuinely free tier for a second deployed service as of 2026 (Render worker: $7+/month; Fly.io: no free tier for new accounts). Deviation: worker runs as a second process inside the same free Render web service container, started via the service's Start Command (`python -m app.core.worker & uvicorn ...`), rather than as its own deployed service. This is arguably *more* faithful to Section 8.1's original wording than the alternative would have been, but is logged here since it wasn't an explicit design doc decision at the time it was written. If Render/Fly pricing changes again, or the worker's load grows enough to need real isolation, revisit this.
+- **venv activation troubleshooting (Day 6):** early in Day 6, `pip install` and `python create_table.py` were run without the venv actually active (`(venv)` prefix missing from prompt); pip silently fell back to a `--user` install into global Python, so `psycopg2`/`dotenv` appeared installed but weren't visible to the venv's interpreter. Resolved by explicitly running `venv\Scripts\activate` and reinstalling once `(venv)` was confirmed in the prompt. No lasting impact — logged as a reminder to visually confirm `(venv)` before installing/running on any future day.
 
 ---
 
@@ -263,3 +287,8 @@
 - **Deployment status:** live in production as of Day 5 (see deployed URLs above)
 - **Seed data:** `python seed.py` (from `backend/`) creates one Organization + one Application, prints their UUIDs — needed for any trace POST test. Re-run only if the DB is reset.
 - **Testing endpoints on Windows:** use `http://127.0.0.1:8000/docs` (Swagger UI) — avoids PowerShell quote-escaping issues with `curl.exe`. Terminal alternative: `Invoke-RestMethod` with a PowerShell hashtable body (see Day 3 log).
+- **RAG test app repo path:** `C:\Users\kirut\Desktop\AI Engineer Copilot\rag-test-app` — sibling folder to `backend/` and `frontend/`, own venv, own `.env` (same `DATABASE_URL` as backend), own `.gitignore`
+- **Activate rag-test-app venv:** `venv\Scripts\activate` (from `rag-test-app/`) — **always confirm `(venv)` appears in the prompt before installing or running anything**; see Day 6 deviation note
+- **Re-run ingestion:** `python ingest_documents.py` (from `rag-test-app/`, venv active) — safe to re-run any time, truncates and reinserts all chunks
+- **Sanity-check ingestion:** `python verify_ingestion.py` — prints per-file chunk counts, total, and confirms the Product X chunk is intact
+- **`documents` table:** lives in the same Neon `neondb` database as the platform's tables, but is only ever read by `rag-test-app`'s own retrieval step (Day 7+) — the platform never queries it directly, only receives traces via the API
