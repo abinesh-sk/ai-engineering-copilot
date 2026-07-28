@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 6 — Local RAG test app scaffolded (`rag-test-app/`, separate venv, decoupled from platform); 3 sample company-policy documents written; paragraph-chunked, embedded locally (`all-MiniLM-L6-v2`, 384-dim), and stored in a new `documents` table in the same Neon Postgres/pgvector instance
-**Next up:** Day 7 — Wire retrieval + prompt + Groq LLM call into `rag-test-app`; package and POST a full trace to the platform
+**Last completed:** Day 7 — Wired retrieval + prompt + Groq LLM call into `rag-test-app`; full trace (retrieval span + llm_call span, real `raw_data`) packaged and POSTed to the live Render backend for the first time — end-to-end loop confirmed in production
+**Next up:** Day 8 — Build 2-3 deliberately broken scenarios (bad metadata filter, low Top-K, chunk splits a key sentence)
 **Blocking issues:** None
 
 ---
@@ -59,6 +59,10 @@
 - **Paragraph-based chunking** — splitting on blank lines works well here because each policy document's paragraphs are already self-contained rules; avoids arbitrary character-count splits that could cut a key sentence in half (a failure mode deliberately *reintroduced* on purpose in Day 8) (Day 6)
 - **Chunks stored in a separate `documents` table, not the platform's schema** — the platform never queries this table directly; it only ever sees the trace the RAG app sends it via the API, keeping the "platform doesn't own the pipeline" boundary honest even in V1, ahead of it mattering for real in Section 21 (Day 6)
 - **venv activation is a silent failure mode, not just a convenience** — `pip install` without `(venv)` showing in the prompt installs into the user/global Python via `--user` fallback, not the venv; the package appears "installed" (pip says Successfully installed) but the script run under the venv's Python still can't see it. Always confirm `(venv)` is present before installing or running (Day 6)
+- **pgvector's `<=>` operator is cosine *distance*, not similarity** — 0 means identical, 2 means opposite; converting via `1 - distance` gives the "higher = more similar" score used throughout the design doc's language (Day 7)
+- **Cold model-load time vs. actual retrieval time** — `retrieve()`'s first call includes loading `SentenceTransformer` into memory, which dwarfs the actual pgvector query; something to isolate properly once real latency metrics matter (Feature Extraction, Days 10-12), not conflate as "slow retrieval" (Day 7)
+- **LLM non-determinism at low but nonzero temperature** — identical code, identical query, two different Groq calls produced differently-worded (both correct) answers at `temperature=0.2`; matters for Day 8, since a "broken" trace needs to be broken by a deliberate config change, not confused with ordinary run-to-run variance (Day 7)
+- **Why the RAG test app computes its own `total_cost_usd`** — Groq's free tier means actual spend is $0, but hardcoding published per-token pricing into the trace payload gives Feature Extraction (Day 12) and Evidence Producers realistic, non-zero cost data to reason about, matching what a real paid deployment would report (Day 7)
 
 ---
 
@@ -188,7 +192,24 @@
 ---
 
 ### Day 7 — Wire retrieval + prompt + Groq LLM call; POST full trace
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.2
+**Learning objective (per design doc):** This is the AI Application Layer — why it must stay decoupled from the platform
+
+**What was built:**
+- Groq API key created (free tier), stored in `rag-test-app/.env` as `GROQ_API_KEY`; `groq` and `requests` packages installed
+- `rag-test-app/retrieval.py` — `retrieve(query, top_k=3)`: embeds the query with the same local model used for ingestion, runs a pgvector cosine-similarity search (`<=>` operator, converted to a `1 - distance` similarity score) against `documents`, returns top-k chunks + retrieval latency
+- `rag-test-app/generation.py` — `build_prompt()` assembles a system prompt (instructs the model to answer only from provided excerpts) + retrieved chunks + the user query; `generate()` calls Groq (`llama-3.3-70b-versatile`, `temperature=0.2`), returns the answer, full prompt text, token counts, and generation latency
+- `rag-test-app/post_trace.py` — runs retrieval + generation, computes `total_latency_ms` and a realistic `total_cost_usd` (from Groq's published per-token pricing, even though actual free-tier spend is $0), packages everything into the exact `TraceCreate` shape from `backend/app/trace/schemas.py` (retrieval span + llm_call span, each with real `raw_data`), and POSTs to the live Render backend
+
+**Verified:**
+- `python retrieval.py` on the Section 2 example query ("Can I return Product X? It is within the 30-day return period.") correctly surfaced the Product X non-returnable chunk as the top match (similarity 0.615), ahead of the general returns and damaged-items chunks
+- `python generation.py` produced a correct answer (Product X is non-returnable) with sane token counts (331 prompt / 83 completion)
+- `python post_trace.py` → `Status: 201`, full trace object returned with server-generated `id`, both spans nested with complete `raw_data` (retrieval results, full prompt text, model config, answer, token counts) — confirmed live in production (Render → Postgres), not just locally
+
+**Deviation logged:** none — see Learning Log for the cold-model-load-time and LLM-non-determinism notes to carry into later days.
+
+---
 
 ### Day 8 — Deliberately broken scenarios (failure injection)
 **Status:** ⬜ Not started
@@ -292,3 +313,6 @@
 - **Re-run ingestion:** `python ingest_documents.py` (from `rag-test-app/`, venv active) — safe to re-run any time, truncates and reinserts all chunks
 - **Sanity-check ingestion:** `python verify_ingestion.py` — prints per-file chunk counts, total, and confirms the Product X chunk is intact
 - **`documents` table:** lives in the same Neon `neondb` database as the platform's tables, but is only ever read by `rag-test-app`'s own retrieval step (Day 7+) — the platform never queries it directly, only receives traces via the API
+- **`rag-test-app/.env` also needs `GROQ_API_KEY`** (free tier, from console.groq.com) alongside `DATABASE_URL`
+- **Seed IDs for trace payloads:** `org_id = ab6ed8df-5f97-428c-8d70-77773c676988`, `application_id = a3c12e69-94bf-48a5-9183-293356c59d47` (from `backend/seed.py` output, Day 3) — hardcoded at the top of `rag-test-app/post_trace.py`
+- **Run the full loop:** `python post_trace.py` (from `rag-test-app/`, venv active) — retrieves, calls Groq, packages a trace, POSTs to `https://ai-engineering-copilot.onrender.com/api/v1/traces`. First call after Render idles may take a few extra seconds (cold start), not a bug
