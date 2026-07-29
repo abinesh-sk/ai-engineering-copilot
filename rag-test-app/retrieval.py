@@ -9,12 +9,16 @@ load_dotenv()
 # Loaded once at import time — reused across calls, not reloaded per query
 _model = SentenceTransformer("all-MiniLM-L6-v2")
 
-def retrieve(query: str, top_k: int = 3):
+def retrieve(query: str, top_k: int = 3, table: str = "documents", category: str | None = None):
     """
     Embeds the query, runs a pgvector cosine-similarity search against
-    the `documents` table, and returns the top_k closest chunks along
-    with their similarity scores and how long retrieval took.
+    the given table (optionally restricted to a metadata category),
+    and returns the top_k closest chunks along with similarity scores
+    and how long retrieval took.
     """
+    if table not in ("documents", "documents_bad_chunking"):
+        raise ValueError(f"Unknown table: {table}")
+
     start = time.time()
 
     query_embedding = _model.encode(query).tolist()
@@ -22,19 +26,29 @@ def retrieve(query: str, top_k: int = 3):
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     cur = conn.cursor()
 
-    # <=> is pgvector's cosine distance operator (0 = identical, 2 = opposite).
-    # We convert to a similarity score (1 - distance) so higher = more similar,
-    # matching the "similarity score" language used throughout the design doc.
-    cur.execute(
-        """
-        SELECT source_file, chunk_index, content,
-               1 - (embedding <=> %s::vector) AS similarity
-        FROM documents
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s;
-        """,
-        (query_embedding, query_embedding, top_k),
-    )
+    if category is not None:
+        cur.execute(
+            f"""
+            SELECT source_file, chunk_index, content,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM {table}
+            WHERE category = %s
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s;
+            """,
+            (query_embedding, category, query_embedding, top_k),
+        )
+    else:
+        cur.execute(
+            f"""
+            SELECT source_file, chunk_index, content,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM {table}
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s;
+            """,
+            (query_embedding, query_embedding, top_k),
+        )
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -52,7 +66,6 @@ def retrieve(query: str, top_k: int = 3):
     ]
 
     return results, latency_ms
-
 
 if __name__ == "__main__":
     results, latency_ms = retrieve("Can I return Product X? It is within the 30-day return period.")

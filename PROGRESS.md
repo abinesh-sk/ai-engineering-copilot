@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 7 — Wired retrieval + prompt + Groq LLM call into `rag-test-app`; full trace (retrieval span + llm_call span, real `raw_data`) packaged and POSTed to the live Render backend for the first time — end-to-end loop confirmed in production
-**Next up:** Day 8 — Build 2-3 deliberately broken scenarios (bad metadata filter, low Top-K, chunk splits a key sentence)
+**Last completed:** Day 8 — Built and posted 3 deliberately broken retrieval scenarios (low Top-K, bad chunking, bad metadata filter) to the live Render backend, each with recorded ground truth (`injected_failure`, `expected_correct_source`, `expected_correct_chunk_index`) for later stages to check diagnoses against
+**Next up:** Day 9 — Buffer/catch-up day; confirm all traces (Day 7 baseline + Day 8's 3 scenarios) are queryable via direct SQL in the hosted DB
 **Blocking issues:** None
 
 ---
@@ -63,6 +63,10 @@
 - **Cold model-load time vs. actual retrieval time** — `retrieve()`'s first call includes loading `SentenceTransformer` into memory, which dwarfs the actual pgvector query; something to isolate properly once real latency metrics matter (Feature Extraction, Days 10-12), not conflate as "slow retrieval" (Day 7)
 - **LLM non-determinism at low but nonzero temperature** — identical code, identical query, two different Groq calls produced differently-worded (both correct) answers at `temperature=0.2`; matters for Day 8, since a "broken" trace needs to be broken by a deliberate config change, not confused with ordinary run-to-run variance (Day 7)
 - **Why the RAG test app computes its own `total_cost_usd`** — Groq's free tier means actual spend is $0, but hardcoding published per-token pricing into the trace payload gives Feature Extraction (Day 12) and Evidence Producers realistic, non-zero cost data to reason about, matching what a real paid deployment would report (Day 7)
+- **A "broken" trace needs a verified, specific breaking condition, not an assumed one** — the first candidate query for Low Top-K (the original Day 7 damage-related query) turned out to still answer correctly at `top_k=1`, because the retrieved chunk happened to duplicate the needed fact. Failure injection has to be probed and confirmed empirically (via a diagnostic script), the same way retrieval or reasoning correctness would be — assuming a query "should" break something isn't the same as verifying it does (Day 8)
+- **Different failure mechanisms produce different failure *signatures*, not just "wrong answers"** — Low Top-K produced a confident "I don't have enough info" refusal; Bad Chunking produced a partially-correct-but-hedging answer (fact stated, process unclear); Bad Metadata Filter produced total blindness to the correct document. This distinction matters directly for Day 14+: an Evidence Producer inspecting retrieval will need different signals to tell "ranking excluded the right chunk" apart from "the right document was never a candidate" apart from "the right chunk existed but was semantically fragmented" (Day 8)
+- **Metadata filtering happens *before* similarity search, not as part of it** — a wrong category filter (e.g., `category="warranty"` on a returns question) removes an entire document from the candidate pool up front; no amount of embedding quality or `top_k` tuning could recover the correct chunk, because it's excluded before cosine distance is even computed against it (Day 8)
+- **Ground truth needs to be recorded on the trace itself, not just known during testing** — `injected_failure`, `expected_correct_source`, and `expected_correct_chunk_index` were added to the retrieval span's `raw_data` for all 3 broken scenarios; without this, a broken trace would just look like a regular (bad) trace by Day 14, with no recorded record of what the *correct* answer should have been (Day 8)
 
 ---
 
@@ -212,7 +216,24 @@
 ---
 
 ### Day 8 — Deliberately broken scenarios (failure injection)
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.2
+**Learning objective (per design doc):** Failure injection as a testing discipline
+
+**What was built:**
+- `rag-test-app/probe_topk.py` — diagnostic script testing candidate queries against `retrieve()` at `top_k=5` to find a query where the correct chunk does not rank first; used again for later probing (Scenario 2 verification)
+- `rag-test-app/post_trace_scenarios.py` — parameterized version of `post_trace.py`; `run_and_post()` now accepts `top_k`, `table`, `category`, and a `scenario` label, and tags every posted trace's retrieval span with `injected_failure`, `expected_correct_source`, `expected_correct_chunk_index` (flexible `raw_data` JSON, no schema migration needed — real production traces simply won't have these keys)
+- **Scenario 1 — Low Top-K:** query `"I don't want Product X anymore, can I send it back for a refund?"` naturally ranks the correct chunk (Non-Returnable Categories, idx=2) at rank 2, behind a lexically-overlapping but inapplicable damage-exception chunk (idx=3). `top_k=1` truncates the correct chunk out entirely.
+- **Scenario 2 — Bad Chunking:** `rag-test-app/create_table_bad_chunking.py` creates a second table `documents_bad_chunking` (same schema as `documents`); `rag-test-app/ingest_bad_chunking.py` re-chunks `return_policy.txt` using a fixed 120-character splitter (no sentence/paragraph awareness), shattering the Non-Returnable Categories paragraph into 4 disconnected fragments. `retrieve()` extended with a `table` parameter (defaults to `"documents"`, so all existing calls are unaffected).
+- **Scenario 3 — Bad Metadata Filter:** `rag-test-app/add_category_column.py` adds a `category` column to the existing `documents` table, backfilled by source file (`return_policy.txt`→`returns`, `shipping_policy.txt`→`shipping`, `warranty_policy.txt`→`warranty`). `retrieve()` extended with an optional `category` parameter that adds a `WHERE category = %s` clause when set. Scenario deliberately passes `category="warranty"` for a plain returns question, excluding `return_policy.txt` from the candidate pool before similarity search runs.
+
+**Verified (each scenario tested standalone before posting, then posted as a real trace — all `201`):**
+- **Low Top-K:** retrieved chunk = only the damage-exception chunk (idx=3); model responded *"I'm unsure about the refund process... the standard return policy is not included in the excerpt"* — correctly recognized insufficient context rather than hallucinating, but still failed to answer the customer's actual question
+- **Bad Chunking:** retrieved 3 fragments of the shattered Non-Returnable Categories paragraph; model responded *"Product X is excluded from standard returns... I'm unsure if it can be returned under warranty... doesn't provide clear instructions"* — got the core fact right but hedged on process, since the fragments were individually true but decontextualized
+- **Bad Metadata Filter:** retrieved only `warranty_policy.txt` chunks (idx 2, 3, 0); model responded *"the provided excerpts only discuss warranty claims and do not mention a return policy"* — correct document was never a candidate, regardless of ranking quality
+- All 3 scenario traces confirmed posted to production (`https://ai-engineering-copilot.onrender.com/api/v1/traces`) with `injected_failure` correctly recorded on each retrieval span
+
+**Deviation logged:** none functionally — `category` addition was applied directly to the existing `documents` table (not a separate table) since it's a pure metadata addition that doesn't corrupt existing chunks/embeddings, unlike Scenario 2 which required an isolated table because the chunking itself was being corrupted.
 
 ### Day 9 — Buffer / catch-up
 **Status:** ⬜ Not started
@@ -316,3 +337,6 @@
 - **`rag-test-app/.env` also needs `GROQ_API_KEY`** (free tier, from console.groq.com) alongside `DATABASE_URL`
 - **Seed IDs for trace payloads:** `org_id = ab6ed8df-5f97-428c-8d70-77773c676988`, `application_id = a3c12e69-94bf-48a5-9183-293356c59d47` (from `backend/seed.py` output, Day 3) — hardcoded at the top of `rag-test-app/post_trace.py`
 - **Run the full loop:** `python post_trace.py` (from `rag-test-app/`, venv active) — retrieves, calls Groq, packages a trace, POSTs to `https://ai-engineering-copilot.onrender.com/api/v1/traces`. First call after Render idles may take a few extra seconds (cold start), not a bug
+- **`documents` table now has a `category` column** (`returns` / `shipping` / `warranty`, backfilled by source file, Day 8) — `retrieve()` accepts an optional `category` param that adds a `WHERE category = %s` filter when set; omit it for unfiltered search (unchanged default behavior)
+- **`documents_bad_chunking` table (Day 8)** — isolated copy of `return_policy.txt` only, re-chunked via fixed 120-char splits instead of paragraphs; used only for Scenario 2, does not have a `category` column. `retrieve()` accepts a `table` param (defaults to `"documents"`) to target it.
+- **Run Day 8 broken scenarios:** `python post_trace_scenarios.py` (from `rag-test-app/`, venv active) — posts all 3 injected-failure traces in sequence (low_top_k, bad_chunking, bad_metadata_filter); safe to re-run, all idempotent POSTs. Each trace's retrieval span carries `injected_failure`, `expected_correct_source`, `expected_correct_chunk_index` for later ground-truth comparison.
