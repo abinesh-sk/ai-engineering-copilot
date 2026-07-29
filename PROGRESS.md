@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 8 — Built and posted 3 deliberately broken retrieval scenarios (low Top-K, bad chunking, bad metadata filter) to the live Render backend, each with recorded ground truth (`injected_failure`, `expected_correct_source`, `expected_correct_chunk_index`) for later stages to check diagnoses against
-**Next up:** Day 9 — Buffer/catch-up day; confirm all traces (Day 7 baseline + Day 8's 3 scenarios) are queryable via direct SQL in the hosted DB
+**Last completed:** Day 9 — Verified via direct SQL against the hosted Neon DB that all traces (10 total, spanning Day 3 through Day 8) have correct span structure (1 `retrieval` + 1 `llm_call` each, no orphans) and that all 7 broken-scenario traces carry intact, correctly-typed ground truth (`injected_failure`, `expected_correct_source`, `expected_correct_chunk_index`) in the retrieval span's `raw_data`
+**Next up:** Day 10 — Feature Extraction Engine: extractor for retrieval metrics (avg/max/min similarity, chunk count)
 **Blocking issues:** None
 
 ---
@@ -236,7 +236,23 @@
 **Deviation logged:** none functionally — `category` addition was applied directly to the existing `documents` table (not a separate table) since it's a pure metadata addition that doesn't corrupt existing chunks/embeddings, unlike Scenario 2 which required an isolated table because the chunking itself was being corrupted.
 
 ### Day 9 — Buffer / catch-up
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.2
+**Learning objective (per design doc):** Buffer / catch-up day
+
+**What was done:**
+- Ran 3 verification queries directly against the hosted Neon DB (via Neon's SQL editor), independent of the API, to confirm Day 7–8 traces survived storage correctly rather than just trusting the `201` responses from ingestion
+- Query 1: confirmed 10 traces total in `traces`, all `status = 'ingested'`, spanning Day 3 manual tests through Day 8's scenario posts
+- Query 2: confirmed every trace_id has exactly one `retrieval` span and one `llm_call` span — no missing spans, no orphaned trace_ids, no duplicates
+- Query 3: pulled `injected_failure` / `expected_correct_source` / `expected_correct_chunk_index` back out of the retrieval span's `raw_data` for all broken-scenario traces — all 3 failure types represented, all correctly reading back as `return_policy.txt` / chunk index `2`, no corruption or type mangling through the JSON round trip
+
+**Findings:**
+- 7 broken-scenario traces exist, not 3 (`low_top_k` ×4, `bad_chunking` ×2, `bad_metadata_filter` ×1) — `post_trace_scenarios.py` was run more than once, and each run appends new rows rather than overwriting. This is consistent with the existing "safe to re-run, idempotent POSTs" note (idempotent = won't crash/corrupt, not = won't create duplicates). No action needed now, but Day 22 (testing Reasoning against these) should either target one trace_id per failure type or expect multiple hits per category.
+- No data-integrity issues found. Ground truth is trustworthy for Days 10+.
+
+**Deviation logged:** `json ? 'key'` (existence operator) doesn't work on plain `json` columns — only `jsonb` supports the `?` operator, since it requires a parsed binary representation to check key existence, which `json` (text-stored) doesn't have. Fixed by casting: `raw_data::jsonb ? 'injected_failure'`. No schema change needed — `->>` (used elsewhere) works fine on `json` already; this only affects existence checks specifically.
+
+**Verified:** All 10 traces structurally sound; all 7 ground-truth payloads intact and correctly typed. Day 9 verification passed — proceeding to Day 10 (Feature Extraction Engine) on trustworthy data.
 
 ### Day 10 — Feature Extraction: retrieval metrics
 **Status:** ⬜ Not started
