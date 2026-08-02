@@ -14,9 +14,14 @@ class TraceMetrics(Base):
         nullable=False,
         unique=True,
     )
-
+    
     # Retrieval metrics (Day 10)
     avg_similarity = Column(Float, nullable=True)
     max_similarity = Column(Float, nullable=True)
     min_similarity = Column(Float, nullable=True)
     chunk_count = Column(Integer, nullable=True)
+
+    prompt_length_chars = Column(Integer, nullable=True)
+    context_length_chars = Column(Integer, nullable=True)
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)

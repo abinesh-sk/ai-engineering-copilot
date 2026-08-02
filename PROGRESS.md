@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 10 — Built and verified the retrieval metrics extractor (`avg/max/min_similarity`, `chunk_count`) against a real trace; `TraceMetrics` table created via migration; extraction logic confirmed correct but not yet wired into the worker (deferred to Day 12 per plan)
-**Next up:** Day 11 — Feature Extraction: prompt/context metrics (prompt length, context tokens, completion tokens)
+**Last completed:** Day 11 — Built and verified the prompt/context metrics extractor (`prompt_length_chars`, `context_length_chars`, `prompt_tokens`, `completion_tokens`) against a real trace; `TraceMetrics` table extended via migration; extraction logic confirmed correct but not yet wired into the worker (deferred to Day 12 per plan)
+**Next up:** Day 12 — Feature Extraction: latency/cost metrics; wire extraction into the worker automatically after ingestion
 **Blocking issues:** None
 
 ---
@@ -278,7 +278,19 @@
 ---
 
 ### Day 11 — Feature Extraction: prompt/context metrics
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.3, Section 7.2
+**Learning objective (per design doc):** Token counting and why it matters for cost and context-fit
+
+**What was built:**
+- `app/features/prompt_extractor.py` — `extract_prompt_metrics(raw_data)`: pure function, reads an `llm_call` span's `raw_data`; returns `prompt_tokens`/`completion_tokens` straight from Groq's real usage response (no re-tokenizing), plus `prompt_length_chars`/`context_length_chars` as a character-count split on the `"\n\nCustomer question:"` marker `generate()` already inserts; returns `None`s (not the doc's real numbers vs. a naive default) on spans missing a `prompt` field (e.g. old dummy test spans)
+- `TraceMetrics` model extended with `prompt_length_chars`, `context_length_chars`, `prompt_tokens`, `completion_tokens` columns (nullable)
+- Migration `080454c8164e` — same autogenerate quirk as Day 10 (wanted to drop `documents`/`documents_bad_chunking`); stripped from both `upgrade()`/`downgrade()` before applying
+- `app/features/test_prompt_extractor.py` — manual verification script
+
+**Verified:** Ran against trace `44291973-32d8-48a7-af28-997436a4d3ef` → `prompt_length_chars: 1252, context_length_chars: 1169, prompt_tokens: 331, completion_tokens: 92`. `prompt_tokens`/`completion_tokens` match Groq's real response exactly; `context_length_chars` (1169) plus the question sentence + marker (83 chars) correctly accounts for the full 1252-char prompt.
+
+**Deviation logged:** Design doc (Section 17.3) says "context tokens." Groq's usage response only tokenizes the whole prompt as one number — it doesn't separate context tokens from question tokens, and re-tokenizing the context substring locally would use a different tokenizer than Llama actually uses, producing a plausible-looking but wrong number. Shipped `context_length_chars` (character count, split on the `"Customer question:"` marker) instead — a real, honestly-labeled proxy rather than a fake token count. Same autogenerate/foreign-table-drop issue as Day 10 — caught and stripped before applying, not a lasting deviation.
 
 ### Day 12 — Feature Extraction: latency/cost; wire into worker
 **Status:** ⬜ Not started
