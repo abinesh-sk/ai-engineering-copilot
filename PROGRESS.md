@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 9 — Verified via direct SQL against the hosted Neon DB that all traces (10 total, spanning Day 3 through Day 8) have correct span structure (1 `retrieval` + 1 `llm_call` each, no orphans) and that all 7 broken-scenario traces carry intact, correctly-typed ground truth (`injected_failure`, `expected_correct_source`, `expected_correct_chunk_index`) in the retrieval span's `raw_data`
-**Next up:** Day 10 — Feature Extraction Engine: extractor for retrieval metrics (avg/max/min similarity, chunk count)
+**Last completed:** Day 10 — Built and verified the retrieval metrics extractor (`avg/max/min_similarity`, `chunk_count`) against a real trace; `TraceMetrics` table created via migration; extraction logic confirmed correct but not yet wired into the worker (deferred to Day 12 per plan)
+**Next up:** Day 11 — Feature Extraction: prompt/context metrics (prompt length, context tokens, completion tokens)
 **Blocking issues:** None
 
 ---
@@ -67,6 +67,10 @@
 - **Different failure mechanisms produce different failure *signatures*, not just "wrong answers"** — Low Top-K produced a confident "I don't have enough info" refusal; Bad Chunking produced a partially-correct-but-hedging answer (fact stated, process unclear); Bad Metadata Filter produced total blindness to the correct document. This distinction matters directly for Day 14+: an Evidence Producer inspecting retrieval will need different signals to tell "ranking excluded the right chunk" apart from "the right document was never a candidate" apart from "the right chunk existed but was semantically fragmented" (Day 8)
 - **Metadata filtering happens *before* similarity search, not as part of it** — a wrong category filter (e.g., `category="warranty"` on a returns question) removes an entire document from the candidate pool up front; no amount of embedding quality or `top_k` tuning could recover the correct chunk, because it's excluded before cosine distance is even computed against it (Day 8)
 - **Ground truth needs to be recorded on the trace itself, not just known during testing** — `injected_failure`, `expected_correct_source`, and `expected_correct_chunk_index` were added to the retrieval span's `raw_data` for all 3 broken scenarios; without this, a broken trace would just look like a regular (bad) trace by Day 14, with no recorded record of what the *correct* answer should have been (Day 8)
+- **A metrics table is its own domain, not bolted onto `Trace`** — `TraceMetrics` lives in a new `app/features/` module with a one-to-one FK (`trace_id` unique + `ondelete="CASCADE"`) rather than adding columns directly to `Trace`; keeps Feature Extraction's output ownership clean, same one-directional module-boundary discipline as Section 6.2 (Day 10)
+- **Alembic autogenerate can't distinguish "your table" from "a table another app put in the same database"** — `documents`/`documents_bad_chunking` exist in the same Neon DB but were created directly by `rag-test-app`, never declared as backend `Base` models; autogenerate diffs the live DB against `Base.metadata` and concluded they shouldn't exist, generating `DROP TABLE` statements for both. Caught before applying by reading the migration file first, not by trusting autogenerate output — the exact discipline Day 2's log already flagged ("reviewed, not blindly trusted") (Day 10)
+- **`None` vs `0.0` for "no data"** — the retrieval extractor returns `None` (not `0.0`) for similarity metrics when a trace has zero retrieved chunks; `0.0` is itself a valid, meaningful similarity score (completely dissimilar), so using it as a stand-in for "no measurement" would silently corrupt any later averaging or thresholding an Evidence Producer does (Day 10)
+- **Feature Extraction must be blind to ground-truth/test-only keys** — the retrieval extractor reads only `results[].similarity` from `raw_data`, deliberately never `injected_failure`/`expected_correct_*`; those keys exist only on Day 8 scenario traces, and extraction logic must behave identically on real vs. scenario traces or it isn't really testing the production code path (Day 10)
 
 ---
 
@@ -255,7 +259,23 @@
 **Verified:** All 10 traces structurally sound; all 7 ground-truth payloads intact and correctly typed. Day 9 verification passed — proceeding to Day 10 (Feature Extraction Engine) on trustworthy data.
 
 ### Day 10 — Feature Extraction: retrieval metrics
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.3, Section 7.2
+**Learning objective (per design doc):** Turning nested data into flat, comparable numbers
+
+**What was built:**
+- `app/features/models.py` — `TraceMetrics` model: one row per trace (`trace_id` unique + FK to `traces.id` with `ondelete="CASCADE"`), columns for retrieval metrics today (`avg_similarity`, `max_similarity`, `min_similarity`, `chunk_count`); prompt/latency/cost columns deliberately deferred to Day 11/12 migrations rather than added empty now
+- Migration `504ab86a3c3e` — `alembic revision --autogenerate` initially also generated `DROP TABLE` statements for `documents` and `documents_bad_chunking`, since those tables exist in the same Neon DB but were never declared as backend `Base` models (owned by `rag-test-app`, not the platform); manually stripped from both `upgrade()`/`downgrade()` before applying
+- `app/features/retrieval_extractor.py` — `extract_retrieval_metrics(raw_data)`: pure function, reads only `results[].similarity` from a retrieval span, returns `avg/max/min_similarity` + `chunk_count`; explicitly never reads `injected_failure`/`expected_correct_*` (Day 8 scenario-only keys) — must behave identically on real vs. scenario traces; returns `None`s (not `0.0`) on empty results, since `0.0` is itself a meaningful similarity value and would corrupt later averaging/thresholding if used as a placeholder
+- `app/features/test_retrieval_extractor.py` — manual verification script, runs the extractor against one real trace and prints the result
+
+**Verified:** Ran against trace `1db70bc2-af97-4be9-bf32-e326eae840c4` (the bad-metadata-filter scenario trace, similarities `0.4467/0.3602/0.3294`) → `avg_similarity: 0.37878039559504817, max: 0.4467191696166992, min: 0.32936155796051025, chunk_count: 3`, matching hand-calculated expected values (avg differs only in the 15th decimal — float summation order, not a bug)
+
+**Deviation logged:** none functionally — see What was built for the autogenerate/foreign-table drop issue, which was caught and fixed before applying, not a lasting deviation.
+
+**Decision:** `TraceMetrics` rows are not written to the DB yet — extraction logic is proven correct via the test script, but wiring into the worker is explicitly Day 12's scope per the design doc ("wire extraction into the worker automatically after ingestion"). Writing partial rows today would blur that milestone.
+
+---
 
 ### Day 11 — Feature Extraction: prompt/context metrics
 **Status:** ⬜ Not started
@@ -356,3 +376,4 @@
 - **`documents` table now has a `category` column** (`returns` / `shipping` / `warranty`, backfilled by source file, Day 8) — `retrieve()` accepts an optional `category` param that adds a `WHERE category = %s` filter when set; omit it for unfiltered search (unchanged default behavior)
 - **`documents_bad_chunking` table (Day 8)** — isolated copy of `return_policy.txt` only, re-chunked via fixed 120-char splits instead of paragraphs; used only for Scenario 2, does not have a `category` column. `retrieve()` accepts a `table` param (defaults to `"documents"`) to target it.
 - **Run Day 8 broken scenarios:** `python post_trace_scenarios.py` (from `rag-test-app/`, venv active) — posts all 3 injected-failure traces in sequence (low_top_k, bad_chunking, bad_metadata_filter); safe to re-run, all idempotent POSTs. Each trace's retrieval span carries `injected_failure`, `expected_correct_source`, `expected_correct_chunk_index` for later ground-truth comparison.
+- **`app/features/` module (Day 10+)** — Feature Extraction lives here, separate from `trace/`; `TraceMetrics` table (one row per trace, `trace_id` unique) holds all extracted numbers across Days 10-12. Manually test any extractor function against a real trace: `python -m app.features.test_retrieval_extractor` (from `backend/`, venv active) — edit the `TRACE_ID` constant at the top of the script to point at a different trace.

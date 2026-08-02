@@ -13,6 +13,7 @@ load_dotenv()
 
 from app.core.models import Base
 from app.trace.models import Trace, TraceSpan  # noqa: F401 — must import so Base knows about them
+from app.features.models import TraceMetrics
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
