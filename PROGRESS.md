@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 12 — Built the latency/cost metrics extractor and wired all three Feature Extraction extractors (retrieval, prompt, latency/cost) into the background worker; `process_trace_job` now automatically upserts a real `TraceMetrics` row and flips trace status to `"extracted"` on every real trace posted — full async pipeline (ingest → queue → extract) verified end-to-end for the first time
-**Next up:** Day 13 — buffer/catch-up day: test extraction against Day 8's broken-scenario traces, confirm the numbers look wrong where expected
+**Last completed:** Day 13 — Confirmed Feature Extraction correctly surfaces all three Day 8 broken scenarios with distinct, expected signatures (low similarity for `bad_metadata_filter`, starved context/tokens for `bad_chunking`, deceptively high similarity + chunk_count=1 for `low_top_k`); also caught and fixed a real bug — Neon silently closing idle DB connections, causing intermittent `SSL connection has been closed unexpectedly` errors — via `pool_pre_ping=True` / `pool_recycle=300` on the SQLAlchemy engine
+**Next up:** Day 14 — Phase 4 begins: define the Evidence table and producer interface; build the Retriever Evidence Producer first
 **Blocking issues:** None
 
 ---
@@ -308,7 +308,26 @@
 **Deviation logged:** None — extractor and worker wiring both matched the design doc's plan for this day without needing a scope change.
 
 ### Day 13 — Buffer / catch-up
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.3
+**Learning objective (per design doc):** Buffer / catch-up day
+
+**What was done:**
+- Re-enqueued extraction jobs for the three Day 8 broken-scenario traces (which predated Day 12's real worker wiring, so they had spans but no `TraceMetrics` row) via a one-off script, `backend/scripts/enqueue_existing_traces.py`
+- Verified each scenario's extracted metrics against a prediction made before running, to confirm the pipeline actually detects the injected failure rather than just completing without error
+
+**Results vs. predictions:**
+| Scenario | Predicted | Actual |
+|---|---|---|
+| `bad_metadata_filter` | avg_similarity notably low (~0.32-0.44) | `0.379` ✅ |
+| `bad_chunking` | chunk_count still 3, similarity looks fine (~0.55-0.63), but tokens/context much smaller than the good trace (331 tokens) | `chunk_count: 3`, `avg_similarity: 0.620`, `prompt_tokens: 202` ✅ |
+| `low_top_k` | chunk_count = 1, similarity possibly high (false confidence) | `chunk_count: 1`, `avg_similarity: 0.758` (highest of all three) ✅ |
+
+All three now have real ground-truth `TraceMetrics` rows with distinct failure signatures — important going into Day 14+, since Evidence Producers need to distinguish between "obviously bad" (metadata filter) and "confidently wrong" (low top-k) failure shapes, not just flag anything below a single threshold.
+
+**Bug caught and fixed (not part of the planned scope, but real):** First re-enqueue attempt threw `psycopg2.OperationalError: SSL connection has been closed unexpectedly` on the `bad_chunking` job. Root cause: Neon's free tier silently closes idle connections; SQLAlchemy's default engine doesn't verify a pooled connection is still alive before reusing it. Fixed in `app/core/database.py` by adding `pool_pre_ping=True` (tests each connection before use, transparently reconnects if dead) and `pool_recycle=300` (proactively recycles connections older than 5 min) to `create_engine(...)`. Re-ran after the fix — succeeded, and the upsert logic proved idempotent (already-completed jobs re-ran cleanly with identical numbers, no duplicate rows).
+
+**Deviation logged:** None to the day's actual scope. The SSL fix is an infra correction, not a scope change — logged here since it will matter for every future worker run, not just Day 13's testing.
 
 ### Day 14 — Evidence table + producer interface + Retriever Evidence Producer
 **Status:** ⬜ Not started
