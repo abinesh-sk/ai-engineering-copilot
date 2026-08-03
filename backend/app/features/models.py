@@ -25,3 +25,8 @@ class TraceMetrics(Base):
     context_length_chars = Column(Integer, nullable=True)
     prompt_tokens = Column(Integer, nullable=True)
     completion_tokens = Column(Integer, nullable=True)
+
+    retrieval_latency_ms = Column(Integer, nullable=True)
+    llm_latency_ms = Column(Integer, nullable=True)
+    total_latency_ms = Column(Integer, nullable=True)
+    total_cost_usd = Column(Float, nullable=True)

@@ -17,8 +17,8 @@
 
 ## Current Status
 
-**Last completed:** Day 11 — Built and verified the prompt/context metrics extractor (`prompt_length_chars`, `context_length_chars`, `prompt_tokens`, `completion_tokens`) against a real trace; `TraceMetrics` table extended via migration; extraction logic confirmed correct but not yet wired into the worker (deferred to Day 12 per plan)
-**Next up:** Day 12 — Feature Extraction: latency/cost metrics; wire extraction into the worker automatically after ingestion
+**Last completed:** Day 12 — Built the latency/cost metrics extractor and wired all three Feature Extraction extractors (retrieval, prompt, latency/cost) into the background worker; `process_trace_job` now automatically upserts a real `TraceMetrics` row and flips trace status to `"extracted"` on every real trace posted — full async pipeline (ingest → queue → extract) verified end-to-end for the first time
+**Next up:** Day 13 — buffer/catch-up day: test extraction against Day 8's broken-scenario traces, confirm the numbers look wrong where expected
 **Blocking issues:** None
 
 ---
@@ -293,7 +293,19 @@
 **Deviation logged:** Design doc (Section 17.3) says "context tokens." Groq's usage response only tokenizes the whole prompt as one number — it doesn't separate context tokens from question tokens, and re-tokenizing the context substring locally would use a different tokenizer than Llama actually uses, producing a plausible-looking but wrong number. Shipped `context_length_chars` (character count, split on the `"Customer question:"` marker) instead — a real, honestly-labeled proxy rather than a fake token count. Same autogenerate/foreign-table-drop issue as Day 10 — caught and stripped before applying, not a lasting deviation.
 
 ### Day 12 — Feature Extraction: latency/cost; wire into worker
-**Status:** ⬜ Not started
+**Status:** ✅ Complete
+**Design doc reference:** Section 17.3, Section 8.1
+**Learning objective (per design doc):** Pipeline composition — one worker, multiple stages, clear handoff
+
+**What was built:**
+- `app/features/latency_cost_extractor.py` — `extract_latency_cost_metrics(trace, spans)`: pure function; unlike Days 10-11 these numbers weren't buried in `raw_data` — `retrieval_latency_ms`/`llm_latency_ms` come straight off each span's real `latency_ms` column, `total_latency_ms`/`total_cost_usd` come straight off the `Trace` row (already computed by `post_trace.py`)
+- `TraceMetrics` model extended with `retrieval_latency_ms`, `llm_latency_ms`, `total_latency_ms`, `total_cost_usd` columns (nullable)
+- Migration — same autogenerate quirk as Days 10-11 (`documents`/`documents_bad_chunking` drop calls); stripped before applying
+- `app/core/jobs.py` rewritten: `process_trace_job` now loads the trace + spans, runs all three extractors (retrieval, prompt, latency/cost) with defensive fallbacks for missing spans, merges results, and **upserts** the one `TraceMetrics` row for that trace_id (update if exists, insert if not — safe against RQ re-running a job), then flips `Trace.status` to `"extracted"`; wrapped in try/except/rollback so a failure doesn't leave a half-written row and still surfaces to RQ's failure tracking
+
+**Verified end-to-end (first time the real pipeline did this, not a test script):** Posted a real trace via `rag-test-app/post_trace.py` → worker picked it up automatically → logged merged metrics → row confirmed in `trace_metrics` via direct query. Cross-checked by hand: `retrieval_latency_ms (5052) + llm_latency_ms (1653) = total_latency_ms (6705)` exactly; `prompt_tokens (331) × 0.59/1M + completion_tokens (83) × 0.79/1M = total_cost_usd (0.00026086)` exactly. No duplicate rows, no crash.
+
+**Deviation logged:** None — extractor and worker wiring both matched the design doc's plan for this day without needing a scope change.
 
 ### Day 13 — Buffer / catch-up
 **Status:** ⬜ Not started
